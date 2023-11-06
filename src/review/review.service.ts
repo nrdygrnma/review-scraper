@@ -1,14 +1,18 @@
 import {
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 
 import * as cheerio from 'cheerio';
 import puppeteer from 'puppeteer';
+import { Review } from './review.entity';
 
-interface Review {
+interface ReviewItem {
   name: string;
   ageGroup: string;
   travelType: string;
@@ -25,7 +29,11 @@ interface Review {
 export class ReviewService {
   private readonly logger = new Logger(ReviewService.name);
 
-  constructor(private readonly httpService: HttpService) {}
+  constructor(
+    private readonly httpService: HttpService,
+    @InjectRepository(Review)
+    private reviewRepository: Repository<Review>,
+  ) {}
 
   private readonly baseUrl =
     'https://www.holidaycheck.de/dhr/bewertungen-dominikanische-republik/37c6c7e2-d224-3175-88c1-e6e115718836';
@@ -42,12 +50,11 @@ export class ReviewService {
     }
   }
 
-  async getReviews(): Promise<Review[]> {
+  async getReviews(): Promise<ReviewItem[]> {
     const browser = await puppeteer.launch({
       headless: 'new',
     });
 
-    const page = await browser.newPage();
     const allReviews = [];
     let currentPage = 1;
     let hasNextPage = true;
@@ -60,6 +67,7 @@ export class ReviewService {
         // Scrape the current page
         const htmlContent = await this.getHtml(pageUrl);
         const newReviews = await this.scrapePageWithCheerio(htmlContent);
+
         allReviews.push(...newReviews);
 
         // After scraping, find the 'Next' button and see if it exists
@@ -71,9 +79,18 @@ export class ReviewService {
 
         if (hasNextPage) currentPage++;
       }
-      return allReviews;
+
+      // Add unique identifier
+      allReviews.forEach(async (reviewData) => {
+        const uniqueIdentifier =
+          await this.constructUniqueIdentifier(reviewData);
+        reviewData['uniqueReviewIdentifier'] = uniqueIdentifier;
+      });
+
+      //return allReviews;
+      return await this.saveReviews(allReviews);
     } catch (error) {
-      await page.screenshot({ path: `error-${currentPage}.png` });
+      //await page.screenshot({ path: `error-${currentPage}.png` });
       throw new InternalServerErrorException(
         'An error occurred while scraping reviews.',
         error.message,
@@ -84,7 +101,7 @@ export class ReviewService {
   }
 
   // Helper function to scrape the current page using cheerio
-  async scrapePageWithCheerio(htmlContent: string): Promise<Review[]> {
+  async scrapePageWithCheerio(htmlContent: string): Promise<ReviewItem[]> {
     const $ = cheerio.load(htmlContent);
     const reviews = $('.recent-hotel-review.row')
       .map((_index, element) => {
@@ -130,5 +147,31 @@ export class ReviewService {
       })
       .get();
     return reviews;
+  }
+
+  constructUniqueIdentifier(reviewData) {
+    return `${reviewData.name}-${reviewData.travelType}-${reviewData.travelDate}-${reviewData.travelDuration}-${reviewData.hotelName}`;
+  }
+
+  async saveReviews(reviews: Review[]): Promise<any> {
+    try {
+      return await this.reviewRepository
+        .createQueryBuilder()
+        .insert()
+        .into(Review)
+        .values(reviews)
+        .orIgnore()
+        .execute();
+    } catch (error) {
+      if (error.code === '23505') {
+        // 23505 is the code for unique_violation in PostgreSQL
+        // Handle the duplicate key error
+        throw new ConflictException(
+          'A record with the given unique value already exists.',
+        );
+      } else {
+        throw new InternalServerErrorException('An unexpected error occurred.');
+      }
+    }
   }
 }

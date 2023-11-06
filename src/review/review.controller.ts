@@ -5,8 +5,8 @@ import { ReviewService } from './review.service';
 export class ReviewController {
   constructor(private readonly reviewService: ReviewService) {}
 
-  @Get()
-  findAll(): any {
+  @Get('new')
+  getNewReviewsFromHC(): any {
     return this.reviewService.getReviews();
   }
 }
